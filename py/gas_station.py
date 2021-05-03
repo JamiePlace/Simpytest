@@ -1,148 +1,118 @@
-"""
-Fuel Station Refueling example per SimPy documentation:
-https://simpy.readthedocs.io/en/latest/examples/gas_station_refuel.html
-This example covers various differences in changing the refilling
-threshold percentage as well as differences in customer behavior.
-1. Customers arrive at a fuel station with n number of stations at
-exponentially distributed interarrival times
-2. Customers have one of three tank sizes: small, medium, large
-and refill their tanks based on how much fuel they need at a triangular
-distribution with most people filling 90-100% of their tank up.
-3. The tanker truck is called when the station pump drops below a
-certain threshold defined
-4. The tanker truck takes a constant time to arrive and constant time
-to refill the main pump
-Covers:
-- Resources: Resource
-- Resources: Container
-- Waiting for other processes
-Scenario:
-  A fuel station has a limited number of fuel pumps that share a common
-  fuel reservoir. Cars randomly arrive at the fuel station, request one
-  of the fuel pumps and start refueling from that reservoir.
-  A fuel station control process observes the fuel station's fuel level
-  and calls a tank truck for refueling if the station's level drops
-  below a threshold.
-"""
-import itertools
-
-import matplotlib.pyplot as plt
-import numpy as np
 import simpy
+import random
+import itertools
+from functools import partial, wraps
+import pandas as pd
+import matplotlib.pyplot as plt
 
+class fsru:
+    def __init__(self, env):
+        self.sendout = 1097
+        self.min = 3300
+        self.optim = 14e3
+        self.arrival_time = [5, 33]
+        self.called = False
 
-RANDOM_SEED = 42
-THRESHOLD = 30             # Threshold for calling the tank truck (in %)
-FUEL_TANK_SIZES = [45, 60, 150]   # liters, small/medium/large
-REFUELING_SPEED = 50       # liters / minute
-TANK_TRUCK_TIME = 30       # Minutes it takes the tank truck to arrive
-TANK_REFILL_TIME = 20      # Minutes for refilling the pump
-T_INTER = 1                # Create a car every [min, max] minutes
-SIM_TIME = 1440            # Simulation time in minutes (24 hours)
-
-
-class MonitoredResource(simpy.Resource):
-    """MonitoredResource: custom class for monitoring
-    """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.data = []
-
-    def request(self, *args, **kwargs):
-        self.data.append((self._env.now, len(self.queue)))
-        return super().request(*args, **kwargs)
-
-    def release(self, *args, **kwargs):
-        self.data.append((self._env.now, len(self.queue)))
-        return super().release(*args, **kwargs)
-
-
-class FuelStation:
-    """Create a fuel station with pumps and an underground tank"""
-
-    def __init__(self, env, n_pumps, size):
-        self.fuel_dispensers = MonitoredResource(env, capacity=n_pumps)
-        self.fuel_tank = simpy.Container(env, init=size, capacity=size)
+        self.connection = simpy.Resource(env, capacity=1)
+        self.gas_tank = simpy.Container(env, init=174e3, capacity=174e3)
         self.mon_proc = env.process(self.monitor_tank(env))
 
     def monitor_tank(self, env):
-        """Monitor fuel tank and refill if needed"""
         while True:
-            if self.fuel_tank.level / self.fuel_tank.capacity < THRESHOLD:
-                print('Calling tanker truck at %d' % env.now)
-                yield env.process(tanker(env, self))
+            if self.gas_tank.level <= self.optim:
+                if not self.called:
+                    self.called = True
+                    env.process(tanker(env, self))
+            print(f'sending. tank level @ {env.now}: {self.gas_tank.level}')
 
-            yield env.timeout(10)  # Check every 10 minutes
-
-
-def tanker(env, fuel_station):
-    """Call tanker truck"""
-    yield env.timeout(TANK_TRUCK_TIME)
-    print('Tank truck arriving at time %d' % env.now)
-    amount = fuel_station.fuel_tank.capacity - fuel_station.fuel_tank.level
-    amnt = amount / TANK_REFILL_TIME
-    print('Tank truck refuelling %.1f liters.' % amount)
-    # this doesn't work
-    # probably need to model the tanker as another object with the fuel in the
-    # tank being monitored in a container and every itteration once it starts filling
-    # we monitor the level
-    for i in range(TANK_REFILL_TIME):
-        yield env.timeout(1)
-        print('Tank truck refueled %d at time %d' % (amnt, env.now))
-        yield fuel_station.fuel_tank.put(amnt)
+            yield env.timeout(1)
 
 
-def car(name, env, fuel_station):
-    """Car process interaction, refill car from tank"""
-    fuel_tank_level = np.random.triangular(0.75, .90, 1.0)
-    print('%s arriving at fuel station at %.1f' % (name, env.now))
-    with fuel_station.fuel_dispensers.request() as req:
-        start = env.now
-        # Request one of the fuel pumps
+def tanker(env, fsru):
+    with fsru.connection.request() as req:
         yield req
+        yield env.timeout(random.randint(*fsru.arrival_time))
+        print(f'Tanker arriving at {env.now}')
+        amount = 80e3
+        time = 15-1
+        apt = amount/time
+        print(f'---- TANKER ------')
+        print(f'Current Level: {fsru.gas_tank.level}')
+        print(f'End Level: {fsru.gas_tank.level + amount}')
+        print(f'------------------')
+        for i in range(time):
+            yield fsru.gas_tank.put(apt)
+            yield env.timeout(1)
+            print(f'filling @ {env.now}. tank level: {fsru.gas_tank.level}')
+        fsru.called = False
+        print(f'Tanker leaving @ {env.now}, tank level: {fsru.gas_tank.level}')
 
-        # Get the required amount of fuel
-        fuel_tank_size = np.random.choice(FUEL_TANK_SIZES)
-        liters_required = fuel_tank_size * fuel_tank_level
-        yield fuel_station.fuel_tank.get(liters_required)
 
-        # The "actual" refueling process takes some time
-        yield env.timeout(liters_required / REFUELING_SPEED)
-
-        print(
-            '%s finished refueling in %.1f minutes at %d. Filled %d liters. %d liters ramining' % 
-            (name, env.now - start, env.now, liters_required, fuel_station.fuel_tank.level)
-        )
-
-
-def car_generator(env, fuel_station):
-    """Generate new cars that arrive at the fuel station."""
+def sendout(env, fsru):
     for i in itertools.count():
-        yield env.timeout(np.random.exponential(T_INTER))
-        env.process(car('Car %d' % i, env, fuel_station))
+        amnt_send = min([1097, fsru.gas_tank.level - fsru.min])
+        if amnt_send > 0:
+            fsru.gas_tank.get(amnt_send)
+        yield env.timeout(1)
 
+def patch_resource(resource, pre=None, post=None):
+     """Patch *resource* so that it calls the callable *pre* before each
+     put/get/request/release operation and the callable *post* after each
+     operation.  The only argument to these functions is the resource
+     instance.
 
-if __name__ == "__main__":
-    np.random.seed(RANDOM_SEED)
-    n_pumps = [2, 4]
-    sizes = [5000, 10000]
-    fig, ax = plt.subplots(len(n_pumps), 2, sharex='col', sharey='row')
-    for i, capacity in enumerate(n_pumps):
-        for j, size in enumerate(sizes):
-            env = simpy.Environment()
+     """
+     def get_wrapper(func):
+         # Generate a wrapper for put/get/request/release
+         @wraps(func)
+         def wrapper(*args, **kwargs):
+             # This is the actual wrapper
+             # Call "pre" callback
+             if pre:
+                 pre(resource)
 
-            fuel_station = FuelStation(env, capacity, size)
-            env.process(car_generator(env, fuel_station))
-            env.run(until=SIM_TIME)
+             # Perform actual operation
+             ret = func(*args, **kwargs)
 
-            X = [d[0] for d in fuel_station.fuel_dispensers.data]
-            y = [d[1] for d in fuel_station.fuel_dispensers.data]
+             # Call "post" callback
+             if post:
+                 post(resource)
 
-            ax[i, j].bar(X, y)
-            ax[i, j].set_title('n=%d, c=%d' %
-                               (capacity, size))
-            ax[i, j].set_xlabel('Sim time')
-            ax[i, j].set_ylabel('Queue size')
+             return ret
+         return wrapper
 
+     # Replace the original operations with our wrapper
+     for name in ['put', 'get', 'request', 'release']:
+         if hasattr(resource, name):
+             setattr(resource, name, get_wrapper(getattr(resource, name)))
+
+def monitor(data, resource):
+     """This is our monitoring callback."""
+     item = (
+         resource._env.now,  # The current simulation time
+         resource.level,  # The level of the container
+     )
+     data.append(item)
+
+if '__main__' in __name__:
+    env = simpy.Environment()
+    fsru = fsru(env)
+
+    data = []
+    monitor = partial(monitor, data)
+    patch_resource(fsru.gas_tank, post=monitor)  # Patches (only) this resource instance
+    env.process(sendout(env, fsru))
+    env.run(200)
+
+    f_lvl = [val[1] for val in data]
+    idx = [val[0] for val in data]
+
+    df = pd.DataFrame(
+        {
+            'row' : idx,
+            'lvl' : f_lvl
+        }
+    )
+    df.to_csv("data.csv")
+    plt.plot(df.row, df.lvl)
     plt.show()
