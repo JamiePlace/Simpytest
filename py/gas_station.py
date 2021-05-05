@@ -3,6 +3,7 @@ import random
 import itertools
 from functools import partial, wraps
 import pandas as pd
+from tqdm import tqdm
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -24,7 +25,7 @@ class fsru:
         # predict when we will get to the optimal level
         self._optim_time = self.find_optimal_time()
         # initial time when the lngc can visit
-        self.lngc_call = lngc.find_closest(self._optim_time)
+        self.lngc_call, self.lngc_duration = lngc.find_closest(self._optim_time)
 
         self.mon_proc = env.process(self.monitor_tank(env))
 
@@ -49,10 +50,11 @@ class fsru:
         return t
 
     def sendout_process(self, env):
-        for i in itertools.count():
+        for i in tqdm(range(self.runtime)):
             amnt_send = min([1097, self.gas_tank.level - self.min])
 
-            print(f'sending. tank level @ {env.now}: {self.gas_tank.level} to {self.gas_tank.level - amnt_send}')
+            #print(f'sending. tank level @ {env.now}: {self.gas_tank.level} to {self.gas_tank.level - amnt_send}')
+
             if amnt_send > 0:
                 self.gas_tank.get(amnt_send)
 
@@ -70,7 +72,10 @@ class lngc:
         self.env = env
         self.data = []
 
-    def find_closest(self, time):
+    def find_leg2(self, time):
+        # account for transit
+        time = time - 5
+
         # find the accessible times for leg 2
         _l2 = np.where(self.leg2.accessible == True)[0].tolist()
         # create a distance metric based on distance from current time
@@ -94,20 +99,80 @@ class lngc:
         # the best time is the minimum of the above list
         try:
             best_time = np.where(np.array(_l2_diff) == min(_l2_diff))[0][0]
-            print('-------- LNGC ---------')
-            print(f'arriving @ {_l2[best_time]}')
-            print(f'ideal time: {time}')
-            print('----------------------')
-
             return(_l2[best_time])
         except:
             # if no times return a time that doesn't exist
-            print('-------- LNGC ---------')
-            print('no more arrivals')
-            print('----------------------')
-            return len(self.leg1) + 1
+            return len(self.leg2) + 2
+
+    def find_leg1(self, time):
+        # account for transit
+        time = time - 2
+        _l1 = np.where(self.leg1.accessible == True)[0].tolist()
+        _l1_diff = [t - time for t in _l1]
+
+        bad_times = np.where(np.array(_l1_diff) < -(self.arrival_time_upper - 5))[0]
+
+        # drop these indices from both lists
+        for item in sorted(bad_times, reverse=True):
+            del _l1[item]
+            del _l1_diff[item]
+
+        _l1_diff = [1/t if t < 0 else t for t in _l1_diff]
+
+        min_val = min(_l1_diff)
+
+        if (min_val > 0):
+            return False, _l1[np.where(np.array(_l1_diff) == min_val)[0][0]]
+
+        else:
+            return True, _l1[np.where(np.array(_l1_diff) == min_val)[0][0]]
+
+
+    def find_closest(self, time):
+        #print('------ FINDING LNGC TIMES --------')
+        #print(f'using optimal time to start {time}')
+        #print('----------------------------------')
+        leg2_t = self.find_leg2(time)
+        if leg2_t > len(self.leg2):
+            leg1_good = True
+            leg1_t = len(self.leg1) + 1
+        else :
+            leg1_good, leg1_t = self.find_leg1(leg2_t)
+        if leg1_good:
+            start_t = leg1_t
+            end_t = leg2_t + 5
+            #print('-------- LNGC ---------')
+            #print(f'entering chanel @ {start_t}')
+            #print(f'arriving @ {end_t}')
+            #print(f'ideal time: {time}')
+            #print('----------------------')
+            # return the start time and the duration
+            return start_t, end_t - start_t
+        else:
+            self.find_closest(leg1_t+2)
+    
+    def find_leg3(self, time):
+        # account for transit
+        _l1 = np.where(self.leg3.accessible == True)[0].tolist()
+        _l1_diff = [t - time for t in _l1]
+
+        bad_times = np.where(np.array(_l1_diff) < 0)[0]
+
+        # drop these indices from both lists
+        for item in sorted(bad_times, reverse=True):
+            del _l1[item]
+            del _l1_diff[item]
+
+
+        min_val = min(_l1_diff)
+
+        return _l1[np.where(np.array(_l1_diff) == min_val)[0][0]]
+        
+
 
     def tanker(self, env, fsru):
+        #print('----- LNGC ENTERING CHANNEL -------')
+        yield env.timeout(fsru.lngc_duration)
         with fsru.connection.request() as req:
             yield req
             self.data.append(self.LNG.level)
@@ -117,25 +182,27 @@ class lngc:
                 desired_sendout = min(self.sendout, self.LNG.level)
                 amnt = min(fsru.gas_tank.capacity - fsru.gas_tank.level, desired_sendout)
 
-                print(f'emptying lngc @ {env.now}, from {self.LNG.level} to {self.LNG.level - amnt}')
-                print(f'filling @ {env.now}. from {fsru.gas_tank.level} to {fsru.gas_tank.level + amnt}')
+                #print(f'emptying lngc @ {env.now}, from {self.LNG.level} to {self.LNG.level - amnt}')
+                #print(f'filling @ {env.now}. from {fsru.gas_tank.level} to {fsru.gas_tank.level + amnt}')
                 yield self.LNG.get(amnt)
                 yield fsru.gas_tank.put(amnt)
                 fsru.level.append((env.now, fsru.gas_tank.level))
                 self.data.append(self.LNG.level)
                 yield env.timeout(1)
+            #print('------- LNGC LEAVING ---------')
+            leg3_transit = self.find_leg3(env.now)
+            leg3_time = leg3_transit - env.now
+            for i in range(leg3_time):
+                env.timeout(1)
 
-            
+            fsru.called = False
             fsru._optim_time = fsru.find_optimal_time()
             self.LNG.put(self.LNG.capacity)
-
-            print('------- LNGC LEAVING ---------')
-            fsru.called = False
             # update values for the fsru controller
             # update the new optimal filling time
             # update the time the lngc can make it
-            fsru.lngc_call = lngc.find_closest(fsru._optim_time)
-            print(f'Tanker leaving @ {env.now}, tank level: {fsru.gas_tank.level}')
+            fsru.lngc_call, fsru.lngc_duration = lngc.find_closest(fsru._optim_time)
+            #print(f'Tanker leaving @ {env.now}, tank level: {fsru.gas_tank.level}')
 
 if '__main__' in __name__:
     env = simpy.Environment()
@@ -144,7 +211,9 @@ if '__main__' in __name__:
     fsru = fsru(lngc, env)
 
     runtime = len(lngc.leg1)
+    #runtime = 3000
 
+    fsru.runtime = runtime
     env.process(fsru.sendout_process(env))
     env.run(runtime)
 
