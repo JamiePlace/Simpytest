@@ -6,7 +6,7 @@ import pandas as pd
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import numpy as np
-#comment here
+
 class fsru:
     def __init__(self, lngc, env):
         self.lngc = lngc
@@ -250,7 +250,3 @@ if '__main__' in __name__:
 
     ax2.plot(lngc.data)
     plt.show()
-<<<<<<< HEAD
-    # lol epic comment
-=======
->>>>>>> 9496c75085eb97b00534d7646fbdd0787fd58743
